@@ -67,11 +67,58 @@ const KnowledgeGraphPage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
+      const depth = center ? 1 : 2;       // 概览稍浅；点中心病稍深，方便缩小看外围
+      const max_nodes = center ? 120 : 220;
+
       const g = await fetchKgGraph(
         resolvedProjectId,
-        center ? { center, depth: 2, max_nodes: 180 } : undefined
+        center ? { center, depth, max_nodes } : undefined
       );
       setGraph(g);
+
+      // 记录中心节点
+      currentCenterRef.current = center || null;
+
+      // 等待 setGraph 渲染进 cytoscape 后再计算 hop
+      setTimeout(() => {
+        try {
+          const cy = cyRef.current;
+          if (!cy) return;
+
+          // 清掉旧中心样式
+          cy.nodes().removeClass("center");
+
+          if (center) {
+            computeHopsFromCenter(center);
+
+            // 设置新中心样式
+            const c = cy.getElementById(center);
+            if (c && !c.empty()) c.addClass("center");
+          }
+
+          bindZoomLOD();
+          applyLODByZoom();
+
+          // 视图居中到中心（更直观）
+          const visible = cy.elements(":visible");
+          if (visible && visible.length > 0) {
+            cy.fit(visible, 60);
+          } else {
+            cy.fit(undefined, 40);
+          }
+          // ✅ 限制最大 zoom，避免出现图1/2那种巨大的文字
+          const MAX_ZOOM = 2.0;
+          const MIN_ZOOM = 0.75;
+          if (cy.zoom() > MAX_ZOOM) cy.zoom(MAX_ZOOM);
+          if (cy.zoom() < MIN_ZOOM) cy.zoom(MIN_ZOOM);
+          cy.zoom(0.95);
+          cy.center();
+          showLabelsForCenterAndHop1();
+        } catch (e) {
+          console.error("LOD/center failed:", e);
+        }
+      }, 0);
+
     } catch (err: any) {
       console.error(err);
       setError(err?.message || "加载知识图谱失败，请检查后端接口是否可用。");
@@ -79,6 +126,7 @@ const KnowledgeGraphPage: React.FC = () => {
       setLoading(false);
     }
   };
+
 
   useEffect(() => {
     const load = async () => {
@@ -121,6 +169,18 @@ const KnowledgeGraphPage: React.FC = () => {
           },
         },
         {
+          selector: ".center",
+          style: {
+            "background-color": "#f97316",
+            width: 42,
+            height: 42,
+            "font-size": 14,
+            "text-outline-width": 3,
+            "text-outline-color": "#0b1020",
+            label: "data(label)",
+          },
+        },
+        {
           selector: 'node[type = "symptom"]',
           style: {
             "background-color": "rgba(148,163,184,0.85)",
@@ -146,6 +206,15 @@ const KnowledgeGraphPage: React.FC = () => {
             "target-arrow-color": "rgba(56,189,248,0.85)",
           },
         },
+        {
+          selector: ".hidden",
+          style: { display: "none" },
+        },
+        {
+          selector: ".nolabel",
+          style: { label: "" },
+        },
+
       ],
     });
 
@@ -169,7 +238,20 @@ const KnowledgeGraphPage: React.FC = () => {
     cy.elements().remove();
     cy.add(elements);
     cy.layout({ name: "cose", animate: false }).run();
+
+
+    const c = currentCenterRef.current;
+    if (c) {
+      try {
+        computeHopsFromCenter(c);
+        bindZoomLOD();
+        applyLODByZoom();
+      } catch (e) {
+        console.error("LOD/compute hops failed:", e);
+      }
+    }
   }, [elements]);
+
 
   const runSearch = async () => {
     const q = searchText.trim();
@@ -185,6 +267,23 @@ const KnowledgeGraphPage: React.FC = () => {
     }
   };
 
+  const showLabelsForCenterAndHop1 = () => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    const centerId = currentCenterRef.current;
+
+    cy.nodes().forEach((n) => {
+      const hop = Number(n.data("hop") ?? 999);
+
+      // ✅ 默认：中心和1跳显示文字
+      const shouldLabel =
+        centerId ? (n.id() === centerId || hop <= 1) : hop <= 1;
+
+      n.toggleClass("nolabel", !shouldLabel);
+    });
+  };
+
   const highlightSymptoms = (symptoms: string[]) => {
     const cy = cyRef.current;
     if (!cy) return;
@@ -194,6 +293,132 @@ const KnowledgeGraphPage: React.FC = () => {
       if (n) n.addClass("highlight");
     });
   };
+  const currentCenterRef = useRef<string | null>(null);
+  const LOD_TOPK = 25; // 中心最多显示25个邻居（可调 10/20/30）
+  const computeHopsFromCenter = (centerId: string) => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    // 先把所有节点 hop 设为很大（表示“很远/未知”）
+    cy.nodes().forEach((n) => { n.data("hop", 999); });
+
+    const root = cy.getElementById(centerId);
+    if (!root || root.empty()) return;
+
+    // root hop=0
+    root.data("hop", 0);
+
+    // 手写 BFS（无向图）
+    const queue: any[] = [root];
+    while (queue.length) {
+      const cur = queue.shift();
+      const curHop = Number(cur.data("hop") ?? 999);
+
+      // 邻居节点（只取 node）
+      cur.neighborhood("node").forEach((nb: any) => {
+        const oldHop = Number(nb.data("hop") ?? 999);
+        if (oldHop > curHop + 1) {
+          nb.data("hop", curHop + 1);
+          queue.push(nb);
+        }
+      });
+    }
+  };
+
+
+
+  const applyTopKForCenter = (centerId: string) => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    const center = cy.getElementById(centerId);
+    if (!center || center.empty()) return;
+
+    // 找中心连接的边，按 weight 降序取 TopK
+    const edges = center.connectedEdges().toArray();
+    edges.sort((a: any, b: any) => (Number(b.data("weight") ?? 0) - Number(a.data("weight") ?? 0)));
+
+    const keep = new Set<string>();
+    edges.slice(0, LOD_TOPK).forEach((e: any) => {
+      keep.add(e.id());
+      keep.add(e.source().id());
+      keep.add(e.target().id());
+    });
+
+    // 非TopK邻居先隐藏（但不影响后续缩小时展开更远层）
+    cy.nodes().forEach((n) => {
+      if (n.id() === centerId) return;
+      const hop = Number(n.data("hop") ?? 999);
+      if (hop === 1 && !keep.has(n.id())) {
+        n.addClass("hidden");
+      }
+    });
+
+    cy.edges().forEach((e) => {
+      const hopS = Number(e.source().data("hop") ?? 999);
+      const hopT = Number(e.target().data("hop") ?? 999);
+      if ((hopS === 0 && hopT === 1) || (hopT === 0 && hopS === 1)) {
+        if (!keep.has(e.id())) e.addClass("hidden");
+      }
+    });
+  };
+
+    const applyLODByZoom = () => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    const z = cy.zoom();
+    const centerId = currentCenterRef.current;
+
+    // 放大看近，缩小看远（节点显示范围）
+    const maxHop = z >= 1.2 ? 1 : z >= 0.85 ? 2 : 3;
+
+    // ✅ 概览模式才按 zoom 隐藏标签；中心模式不走这个规则
+    const hideLabelInOverview = z < 0.6;
+
+    cy.nodes().forEach((n) => {
+      const hop = Number(n.data("hop") ?? 999);
+      const shouldShow = hop === 999 || hop <= maxHop; // hop 未定义/不可达就当远
+
+      n.toggleClass("hidden", !shouldShow);
+
+      // ✅ 标签规则：
+      // - 有中心：中心节点 + 1跳邻居 永远显示文字
+      // - 无中心（概览）：缩小时隐藏文字
+      if (centerId) {
+        const shouldLabel = n.id() === centerId || hop <= 1;
+        n.toggleClass("nolabel", !shouldLabel);
+      } else {
+        n.toggleClass("nolabel", hideLabelInOverview);
+      }
+    });
+
+    cy.edges().forEach((e) => {
+      const hidden = e.source().hasClass("hidden") || e.target().hasClass("hidden");
+      e.toggleClass("hidden", hidden);
+    });
+
+    // 对中心1-hop再做TopK裁剪（只在 maxHop=1 时最需要）
+    if (centerId && maxHop === 1) {
+      applyTopKForCenter(centerId);
+    }
+  };
+
+
+  const bindZoomLOD = () => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    let timer: any = null;
+    cy.off("zoom"); // 避免重复绑定
+    cy.on("zoom", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        applyLODByZoom();
+      }, 80);
+    });
+  };
+
 
   const runDiagnose = async () => {
     const parts = symptomInput
@@ -646,7 +871,15 @@ const KnowledgeGraphPage: React.FC = () => {
               图谱视图 {graph?.center ? `· 以「${graph.center}」为中心` : "· 热点概览"}
             </span>
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn-ghost" onClick={() => loadGraph()}>
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  currentCenterRef.current = null;     // ✅ 清空中心
+                  const cy = cyRef.current;
+                  if (cy) cy.nodes().removeClass("center");
+                  loadGraph();
+                }}
+              >
                 🧭 回到概览
               </button>
               <button
@@ -654,7 +887,12 @@ const KnowledgeGraphPage: React.FC = () => {
                 onClick={() => {
                   const cy = cyRef.current;
                   if (!cy) return;
-                  cy.fit(undefined, 40);
+                  const visible = cy.elements(":visible");
+                  cy.fit(visible && visible.length ? visible : undefined, 40);
+                  const MAX_ZOOM = 2.0;
+                  const MIN_ZOOM = 0.75;
+                  if (cy.zoom() > MAX_ZOOM) cy.zoom(MAX_ZOOM);
+                  if (cy.zoom() < MIN_ZOOM) cy.zoom(MIN_ZOOM);
                 }}
               >
                 🔍 适配视图
