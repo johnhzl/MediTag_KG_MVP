@@ -1,0 +1,275 @@
+:root {
+  --bg-body: #050816;
+  --bg-sidebar: #0b1020;
+  --bg-surface: #0f172a;
+  --bg-surface-soft: #111827;
+  --border-subtle: rgba(148, 163, 184, 0.25);
+  --text-primary: #e5e7eb;
+  --text-secondary: #9ca3af;
+  --accent: #38bdf8;
+  --accent-soft: rgba(56, 189, 248, 0.15);
+  --danger: #fb7185;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --shadow-soft: 0 18px 45px rgba(15, 23, 42, 0.7);
+  --sidebar-width: 260px;
+  --header-height: 64px;
+  --transition-fast: 0.18s ease-out;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: radial-gradient(circle at top left, #1e293b 0, #020617 45%);
+  color: var(--text-primary);
+}
+
+/* 布局骨架 */
+
+.app-root {
+  display: flex;
+  min-height: 100vh;
+  background: transparent;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(20px);
+}
+
+.app-content {
+  flex: 1;
+  padding: 20px 24px 24px;
+  overflow: auto;
+}
+
+/* 简单的滚动条美化 */
+.app-content::-webkit-scrollbar {
+  width: 8px;
+}
+.app-content::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+}
+.app-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.5);
+}
+
+/* 通用卡片样式 */
+
+.card {
+  background: linear-gradient(145deg, var(--bg-surface), #020617);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-subtle);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-soft);
+}
+
+.card-title {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.card-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  color: var(--text-secondary);
+}
+
+.pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+/* 小按钮 */
+
+.btn-ghost {
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+    color var(--transition-fast), transform var(--transition-fast);
+}
+
+.btn-ghost:hover {
+  background: rgba(15, 23, 42, 0.95);
+  border-color: rgba(148, 163, 184, 0.65);
+  color: var(--text-primary);
+  transform: translateY(-0.5px);
+}
+
+/* 标题 */
+
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.page-subtitle {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* 简单响应式 */
+
+@media (max-width: 960px) {
+  :root {
+    --sidebar-width: 220px;
+  }
+  .app-content {
+    padding: 16px;
+  }
+}
+
+/* 简易表格样式（项目列表 / 标注任务） */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.table thead {
+  background: rgba(15, 23, 42, 0.9);
+}
+
+.table th,
+.table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(30, 64, 175, 0.4);
+}
+
+.table th {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+/* 状态小点 */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.status-dot--running {
+  background: #22c55e;
+}
+
+.status-dot--pending {
+  background: #fbbf24;
+}
+
+.status-dot--qc {
+  background: #38bdf8;
+}
+
+/* 时间线样式（最近预处理节点运行） */
+.timeline {
+  margin: 8px 0 0;
+  padding-left: 10px;
+  border-left: 1px solid rgba(148, 163, 184, 0.5);
+}
+
+.timeline-item {
+  position: relative;
+  padding-left: 12px;
+  margin-bottom: 10px;
+}
+
+.timeline-item::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 4px;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.18);
+}
+.tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  color: var(--text-secondary);
+}
+.textarea {
+  width: 100%;
+  min-height: 130px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  padding: 8px 10px;
+  resize: vertical;
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.label-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  background: transparent;
+  transition: background var(--transition-fast),
+    border-color var(--transition-fast), color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.label-pill--active {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.9);
+  color: var(--text-primary);
+  transform: translateY(-0.5px);
+}

@@ -1,0 +1,4 @@
+{"id":"QC-0001","sampleId":"EMR-0001","projectId":"p1","issueType":"高危病例标签与症状不一致","ruleName":"rule_label_vs_symptom","severity":"high","status":"pending","createdAt":"今天 09:21","lastReviewer":"质检员 A"}
+{"id":"QC-0002","sampleId":"EMR-0002","projectId":"p1","issueType":"COT 过短（< 50 tokens）","ruleName":"rule_cot_min_length","severity":"medium","status":"pending","createdAt":"今天 09:05"}
+{"id":"QC-0003","sampleId":"EMR-0003","projectId":"p1","issueType":"模型建议标签与人工标签冲突","ruleName":"rule_model_vs_human","severity":"medium","status":"confirmed","createdAt":"昨天 16:20","lastReviewer":"质检员 B"}
+{"id":"QC-0004","sampleId":"EMR-0003","projectId":"p1","issueType":"可能出现幻想信息（COT 中出现不存在的检查结果）","ruleName":"rule_cot_hallucination","severity":"high","status":"pending","createdAt":"昨天 15:47"}
