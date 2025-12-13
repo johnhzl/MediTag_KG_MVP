@@ -4,10 +4,12 @@ import cytoscape, { Core, ElementsDefinition } from "cytoscape";
 
 import {
   diagnose,
+  diagnoseFromText,
   fetchKgGraph,
   fetchKgStats,
   searchKg,
   DiagnoseResponse,
+  DiagnoseFromTextResponse,
   KgGraphResponse,
   KgNodeType,
 } from "../../services/kgApi";
@@ -28,8 +30,15 @@ const KnowledgeGraphPage: React.FC = () => {
   const [searchText, setSearchText] = useState<string>("");
   const [searchItems, setSearchItems] = useState<any[]>([]);
 
+  // 原有：手动输入症状列表诊断
   const [symptomInput, setSymptomInput] = useState<string>("");
   const [dx, setDx] = useState<DiagnoseResponse | null>(null);
+
+  // 新增：自然语言问诊 → 解析并判别
+  const [nlText, setNlText] = useState<string>("");
+  const [nlLoading, setNlLoading] = useState<boolean>(false);
+  const [nlError, setNlError] = useState<string | null>(null);
+  const [nlDx, setNlDx] = useState<DiagnoseFromTextResponse | null>(null);
 
   const [selectedNode, setSelectedNode] = useState<any | null>(null);
 
@@ -58,7 +67,10 @@ const KnowledgeGraphPage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const g = await fetchKgGraph(resolvedProjectId, center ? { center, depth: 2, max_nodes: 180 } : undefined);
+      const g = await fetchKgGraph(
+        resolvedProjectId,
+        center ? { center, depth: 2, max_nodes: 180 } : undefined
+      );
       setGraph(g);
     } catch (err: any) {
       console.error(err);
@@ -102,7 +114,7 @@ const KnowledgeGraphPage: React.FC = () => {
             "text-outline-width": 2,
             "text-outline-color": "#0b1020",
             "text-wrap": "wrap",
-            "text-max-width": 90,
+            "text-max-width": "90px",
             "background-color": "#38bdf8",
             width: 26,
             height: 26,
@@ -173,6 +185,16 @@ const KnowledgeGraphPage: React.FC = () => {
     }
   };
 
+  const highlightSymptoms = (symptoms: string[]) => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.elements().removeClass("highlight");
+    symptoms.forEach((s) => {
+      const n = cy.getElementById(s);
+      if (n) n.addClass("highlight");
+    });
+  };
+
   const runDiagnose = async () => {
     const parts = symptomInput
       .split(/[,，\n\t]/)
@@ -186,14 +208,40 @@ const KnowledgeGraphPage: React.FC = () => {
     setDx(res);
   };
 
-  const highlightSymptoms = (symptoms: string[]) => {
-    const cy = cyRef.current;
-    if (!cy) return;
-    cy.elements().removeClass("highlight");
-    symptoms.forEach((s) => {
-      const n = cy.getElementById(s);
-      if (n) n.addClass("highlight");
-    });
+  const runDiagnoseFromText = async () => {
+    const text = nlText.trim();
+    setNlError(null);
+
+    if (!text) {
+      setNlDx(null);
+      return;
+    }
+
+    setNlLoading(true);
+    try {
+      const res = await diagnoseFromText(resolvedProjectId, text);
+      setNlDx(res);
+
+      // 自动加载 Top1 疾病子图 + 高亮命中症状节点
+      const top1 = res.ranked_diseases?.[0];
+      if (top1?.disease) {
+        await loadGraph(top1.disease);
+        const nodesToHighlight =
+          res.used_symptom_nodes?.length
+            ? res.used_symptom_nodes
+            : (top1.evidence || []).map((x: any) => x.symptom);
+        highlightSymptoms(nodesToHighlight || []);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setNlError(
+        err?.message ||
+          "自然语言解析/判别失败：请确认后端 diagnose_from_text 接口已启动、且 ARK_API_KEY 已设置。"
+      );
+      setNlDx(null);
+    } finally {
+      setNlLoading(false);
+    }
   };
 
   return (
@@ -223,6 +271,186 @@ const KnowledgeGraphPage: React.FC = () => {
 
       <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, marginTop: 16 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* 新增：自然语言问诊 */}
+          <div className="card">
+            <div className="card-title">自然语言问诊 → 病症判别（LLM + KG）</div>
+            <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 8 }}>
+              你可以输入患者口语描述。后端会先用大模型抽取症状，再映射到图谱节点，最后用图谱关联权重排序疾病，并返回依据与路径。
+            </div>
+
+            <textarea
+              value={nlText}
+              onChange={(e) => setNlText(e.target.value)}
+              placeholder="例如：我最近头痛，流鼻涕，然后还有点咳嗽"
+              style={{
+                width: "100%",
+                minHeight: 84,
+                resize: "vertical",
+                background: "rgba(2,6,23,0.35)",
+                border: "1px solid rgba(148,163,184,0.35)",
+                color: "var(--text-primary)",
+                borderRadius: 12,
+                padding: "8px 10px",
+                fontSize: 12,
+                outline: "none",
+                lineHeight: 1.5,
+              }}
+            />
+
+            <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+              <button className="btn-ghost" onClick={runDiagnoseFromText} disabled={nlLoading}>
+                {nlLoading ? "⏳ 解析中…" : "🗣️ 解析并判别"}
+              </button>
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  setNlText("");
+                  setNlDx(null);
+                  setNlError(null);
+                  highlightSymptoms([]);
+                }}
+              >
+                清空
+              </button>
+            </div>
+
+            {nlError && (
+              <div style={{ marginTop: 10, color: "#fb7185", fontSize: 12 }}>{nlError}</div>
+            )}
+
+            {nlDx && (
+              <div style={{ marginTop: 10 }}>
+                {/* 映射结果 */}
+                <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 6 }}>
+                  解析与节点映射：
+                </div>
+
+                {(!nlDx.linked || nlDx.linked.length === 0) ? (
+                  <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                    未抽取到可用症状（或都被识别为否定/缺失）。你可以换种说法试试。
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {nlDx.linked.map((x, idx) => (
+                      <div
+                        key={`${x.raw}-${idx}`}
+                        style={{
+                          border: "1px solid rgba(148,163,184,0.18)",
+                          borderRadius: 12,
+                          padding: "8px 10px",
+                          background: "rgba(15,23,42,0.45)",
+                          fontSize: 12,
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                          <div>
+                            <span style={{ color: "var(--text-secondary)" }}>原句：</span>
+                            {x.raw}
+                          </div>
+                          <div style={{ color: "var(--text-secondary)" }}>
+                            conf {Math.round((x.confidence || 0) * 100)}%
+                          </div>
+                        </div>
+                        <div>
+                          <span style={{ color: "var(--text-secondary)" }}>映射节点：</span>
+                          {x.node_id ? (
+                            <button
+                              className="btn-ghost"
+                              style={{ padding: 0, border: "none", marginLeft: 6 }}
+                              onClick={() => {
+                                loadGraph(x.node_id!);
+                                highlightSymptoms([x.node_id!]);
+                              }}
+                            >
+                              🧩 {x.node_id}
+                            </button>
+                          ) : (
+                            <span style={{ marginLeft: 6, color: "#fb7185" }}>未匹配到图谱症状节点</span>
+                          )}
+                        </div>
+
+                        {x.candidates && x.candidates.length > 1 && (
+                          <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                            {x.candidates.slice(0, 5).map((c) => (
+                              <span key={c} className="tag">
+                                候选：{c}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* 疾病排名 + 依据路径 */}
+                <div style={{ marginTop: 12, fontSize: 12, color: "var(--text-secondary)", marginBottom: 6 }}>
+                  疾病候选（点击加载子图并高亮命中症状）：
+                </div>
+
+                {(!nlDx.ranked_diseases || nlDx.ranked_diseases.length === 0) ? (
+                  <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                    图谱未能根据当前症状组合给出候选（可能是映射不到节点、或该组合在图里稀疏）。
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {nlDx.ranked_diseases.slice(0, 10).map((it) => (
+                      <div
+                        key={it.disease}
+                        style={{
+                          border: "1px solid rgba(148,163,184,0.22)",
+                          borderRadius: 14,
+                          padding: "8px 10px",
+                          background: "rgba(15,23,42,0.55)",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: 0, border: "none" }}
+                            onClick={async () => {
+                              await loadGraph(it.disease);
+                              const hs = (it.evidence || []).map((x: any) => x.symptom);
+                              highlightSymptoms(hs);
+                            }}
+                          >
+                            🩺 {it.disease}
+                          </button>
+                          <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                            score {it.score} · 命中 {it.hit_count}
+                          </span>
+                        </div>
+
+                        <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {(it.evidence || []).slice(0, 6).map((h: any) => (
+                            <span key={h.symptom} className="tag">
+                              {h.symptom} · {h.weight}
+                            </span>
+                          ))}
+                        </div>
+
+                        {(it.paths || []).length > 0 && (
+                          <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                            路径示例：
+                            <div style={{ marginTop: 4 }}>
+                              {(it.paths || []).slice(0, 3).map((p: any, i: number) => (
+                                <div key={i}>
+                                  {p?.[0]} → {p?.[1]} → {p?.[2]}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 原有：搜索节点 */}
           <div className="card">
             <div className="card-title">搜索节点</div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -264,10 +492,10 @@ const KnowledgeGraphPage: React.FC = () => {
               </button>
             </div>
 
-            <div style={{ marginTop: 10, maxHeight: 260, overflow: "auto" }}>
+            <div style={{ marginTop: 10, maxHeight: 220, overflow: "auto" }}>
               {searchItems.length === 0 ? (
                 <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
-                  暂无结果。你也可以直接点击下方诊断结果加载子图。
+                  暂无结果。你也可以直接点击左侧判别结果加载子图。
                 </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -293,8 +521,9 @@ const KnowledgeGraphPage: React.FC = () => {
             </div>
           </div>
 
+          {/* 原有：症状 → 疾病判别 */}
           <div className="card">
-            <div className="card-title">症状 → 疾病判别</div>
+            <div className="card-title">症状 → 疾病判别（手动输入）</div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 8 }}>
               输入多个症状（逗号/换行分隔），返回疾病 Top 排序（按关联边权加权）。
             </div>
@@ -334,16 +563,21 @@ const KnowledgeGraphPage: React.FC = () => {
             {dx && (
               <div style={{ marginTop: 10 }}>
                 {dx.items.length === 0 ? (
-                  <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>没有匹配到疾病（可能是症状词不在当前图里）。</div>
+                  <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                    没有匹配到疾病（可能是症状词不在当前图里）。
+                  </div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {dx.items.slice(0, 10).map((it) => (
-                      <div key={it.disease} style={{
-                        border: "1px solid rgba(148,163,184,0.22)",
-                        borderRadius: 14,
-                        padding: "8px 10px",
-                        background: "rgba(15,23,42,0.55)",
-                      }}>
+                      <div
+                        key={it.disease}
+                        style={{
+                          border: "1px solid rgba(148,163,184,0.22)",
+                          borderRadius: 14,
+                          padding: "8px 10px",
+                          background: "rgba(15,23,42,0.55)",
+                        }}
+                      >
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                           <button
                             className="btn-ghost"
@@ -355,7 +589,9 @@ const KnowledgeGraphPage: React.FC = () => {
                           >
                             🩺 {it.disease}
                           </button>
-                          <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>score {it.score} · 命中 {it.hit_count}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                            score {it.score} · 命中 {it.hit_count}
+                          </span>
                         </div>
                         <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
                           {it.hits.slice(0, 6).map((h) => (
@@ -372,6 +608,7 @@ const KnowledgeGraphPage: React.FC = () => {
             )}
           </div>
 
+          {/* 原有：当前选中 */}
           <div className="card">
             <div className="card-title">当前选中</div>
             {selectedNode ? (
@@ -395,11 +632,14 @@ const KnowledgeGraphPage: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>点击图谱中的节点查看详情。</div>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                点击图谱中的节点查看详情。
+              </div>
             )}
           </div>
         </div>
 
+        {/* 右侧图谱 */}
         <div className="card" style={{ minHeight: 620, position: "relative" }}>
           <div className="card-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>
@@ -453,12 +693,10 @@ const KnowledgeGraphPage: React.FC = () => {
             </div>
           )}
 
-          {error && (
-            <div style={{ marginTop: 10, color: "#fb7185", fontSize: 12 }}>{error}</div>
-          )}
+          {error && <div style={{ marginTop: 10, color: "#fb7185", fontSize: 12 }}>{error}</div>}
 
           <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-secondary)" }}>
-            说明：当前是 MVP 抽取（关键词/后缀+去否定+频次过滤）。你后续可以把“症状/体征/检查”改成平台内的结构化标注，图谱质量会显著提升。
+            说明：当前图谱结构为 Disease-[:HAS_SYMPTOM]-&gt;Symptom。自然语言解析用于把口语症状映射为图谱节点，最终排序由图谱边权完成（可解释）。
           </div>
         </div>
       </div>

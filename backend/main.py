@@ -6,6 +6,9 @@ from typing import List, Dict, Any, Optional
 import re
 from collections import Counter, defaultdict
 from functools import lru_cache
+import os
+from openai import OpenAI
+
 
 
 app = FastAPI()
@@ -215,6 +218,215 @@ def load_qc_issues(project_id: str) -> List[Dict[str, Any]]:
   # 只保留当前项目的（保险起见）
   issues = [i for i in issues if i.get("projectId") == project_id]
   return issues
+
+def _get_ark_client() -> OpenAI:
+    api_key = os.getenv("ARK_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="缺少环境变量 ARK_API_KEY")
+    return OpenAI(
+        base_url="https://ark.cn-beijing.volces.com/api/v3",
+        api_key=api_key,
+    )
+
+def _extract_first_json_obj(text: str) -> Dict[str, Any]:
+    """
+    容错：从模型输出里抓第一个 {...} 作为 JSON。
+    """
+    if not text:
+        return {}
+    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+def llm_parse_symptoms(patient_text: str) -> Dict[str, Any]:
+    """
+    用 LLM 把口语文本解析成结构化症状，不让模型直接下诊断。
+    输出格式：
+    {
+      "symptoms":[{"text":"流鼻涕","polarity":"present","duration":null,"severity":null}],
+      "negatives":[...],
+      "notes":"..."
+    }
+    """
+    model = os.getenv("ARK_MODEL", "kimi-k2-thinking-251104")
+    client = _get_ark_client()
+
+    # 尽量别把患者ID/姓名等发给模型（你也可以做更严格的脱敏）
+    safe_text = re.sub(r"病患id[:：].*", "", patient_text)
+
+    system = (
+        "你是医疗文本信息抽取助手。"
+        "你的任务：从患者口语描述中抽取“症状/体征”并结构化。"
+        "不要输出疾病诊断，不要给治疗建议。"
+        "必须只输出JSON，不要输出多余文字。"
+        "polarity只能是 present 或 absent。"
+    )
+
+    user = f"""请从下述文本中抽取症状/体征：
+文本：{safe_text}
+
+输出JSON schema：
+{{
+  "symptoms":[{{"text": "...", "polarity":"present|absent", "duration": null, "severity": null}}],
+  "notes":""
+}}
+"""
+
+    resp = client.responses.create(
+        model=model,
+        input=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        # 不建议开 web_search：这一步只做抽取，不需要联网
+    )
+
+    # 兼容取文本
+    out_text = getattr(resp, "output_text", None)
+    if not out_text:
+        # 兜底：从 output 结构拼一下
+        try:
+            chunks = []
+            for item in resp.output:
+                for c in item.content:
+                    if getattr(c, "type", "") in ("output_text", "text"):
+                        chunks.append(getattr(c, "text", "") or "")
+            out_text = "\n".join(chunks)
+        except Exception:
+            out_text = ""
+
+    data = _extract_first_json_obj(out_text)
+    if not data:
+        data = {"symptoms": [], "notes": "LLM输出解析失败"}
+    if "symptoms" not in data or not isinstance(data["symptoms"], list):
+        data["symptoms"] = []
+    return data
+
+_SYM_SYNONYMS = {
+    "流鼻涕": "流涕",
+    "流清鼻涕": "流涕",
+    "鼻涕": "流涕",
+    "嗓子疼": "咽痛",
+    "喉咙痛": "咽痛",
+    "喉咙疼": "咽痛",
+    "有点喘": "气促",
+    "气喘": "气促",
+    "咳": "咳嗽",
+}
+
+def _link_symptom_to_node(kg: Dict[str, Any], raw_sym: str) -> Dict[str, Any]:
+    """
+    raw_sym -> KG symptom node id（尽量可解释：给候选）
+    """
+    raw = _norm_text(raw_sym)
+    if not raw:
+        return {"raw": raw_sym, "node_id": None, "confidence": 0.0, "candidates": []}
+
+    # 1) 同义词强规则
+    canon = _SYM_SYNONYMS.get(raw, raw)
+    if canon in kg["nodes"] and kg["nodes"][canon].get("type") == "symptom":
+        return {"raw": raw_sym, "node_id": canon, "confidence": 0.95, "candidates": [canon]}
+
+    # 2) 精确命中
+    if raw in kg["nodes"] and kg["nodes"][raw].get("type") == "symptom":
+        return {"raw": raw_sym, "node_id": raw, "confidence": 0.9, "candidates": [raw]}
+
+    # 3) 子串召回（候选取前几个）
+    symptom_nodes = [n for n in kg["nodes"].values() if n.get("type") == "symptom"]
+    cands = []
+    for n in symptom_nodes:
+        if raw in n["label"] or n["label"] in raw:
+            cands.append(n["id"])
+            if len(cands) >= 5:
+                break
+
+    if cands:
+        return {"raw": raw_sym, "node_id": cands[0], "confidence": 0.65, "candidates": cands}
+
+    return {"raw": raw_sym, "node_id": None, "confidence": 0.0, "candidates": []}
+
+@app.post("/api/v1/projects/{project_id}/kg/diagnose_from_text")
+def kg_diagnose_from_text(project_id: str, body: Dict[str, Any]):
+    """
+    输入患者自然语言 -> LLM抽取症状 -> 链接到KG节点 -> KG打分
+    返回：症状抽取、节点映射、疾病排名、证据边与路径
+    """
+    text = (body.get("text") or "").strip()
+    if not text:
+        return {"items": []}
+
+    kg = build_kg(project_id)
+
+    parsed = llm_parse_symptoms(text)
+    extracted = parsed.get("symptoms") or []
+
+    # 只取 present 的症状参与推理
+    present_syms = []
+    for s in extracted:
+        t = (s.get("text") or "").strip()
+        pol = (s.get("polarity") or "present").strip()
+        if t and pol == "present":
+            present_syms.append(t)
+
+    linked = []
+    linked_nodes = []
+    for rs in present_syms:
+        one = _link_symptom_to_node(kg, rs)
+        linked.append(one)
+        if one["node_id"]:
+            linked_nodes.append(one["node_id"]
+
+            )
+
+    linked_nodes = sorted(set(linked_nodes))
+    if not linked_nodes:
+        return {
+            "input_text": text,
+            "parsed": parsed,
+            "linked": linked,
+            "ranked_diseases": [],
+        }
+
+    # 建 disease->symptom weight map
+    d2s = defaultdict(dict)
+    for e in kg["edges"]:
+        if e["type"] != "HAS_SYMPTOM":
+            continue
+        d2s[e["source"]][e["target"]] = int(e.get("weight") or 0)
+
+    ranked = []
+    for disease, smap in d2s.items():
+        score = 0
+        hits = []
+        paths = []
+        for sym in linked_nodes:
+            w = smap.get(sym)
+            if w:
+                score += w
+                hits.append({"symptom": sym, "weight": w})
+                paths.append([disease, "HAS_SYMPTOM", sym])
+        if score > 0:
+            hits.sort(key=lambda x: -x["weight"])
+            ranked.append({
+                "disease": disease,
+                "score": score,
+                "hit_count": len(hits),
+                "evidence": hits[:12],
+                "paths": paths[:12],
+            })
+
+    ranked.sort(key=lambda x: (-x["score"], -x["hit_count"], x["disease"]))
+    return {
+        "input_text": text,
+        "parsed": parsed,
+        "linked": linked,
+        "used_symptom_nodes": linked_nodes,
+        "ranked_diseases": ranked[:15],
+    }
 
 # --------- 1) 样本列表接口 ---------
 

@@ -80,3 +80,27 @@ export function diagnose(projectId: string, symptoms: string[]) {
     body: JSON.stringify({ symptoms }),
   });
 }
+
+export interface DiagnoseFromTextResponse {
+  input_text: string;
+  linked: { raw: string; node_id: string | null; confidence: number; candidates: string[] }[];
+  used_symptom_nodes: string[];
+  ranked_diseases: {
+    disease: string;
+    score: number;
+    hit_count: number;
+    evidence: { symptom: string; weight: number }[];
+    paths: string[][];
+  }[];
+}
+
+export function diagnoseFromText(projectId: string, text: string) {
+  return http<DiagnoseFromTextResponse>(`/api/v1/projects/${projectId}/kg/diagnose_from_text`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+
+
+
